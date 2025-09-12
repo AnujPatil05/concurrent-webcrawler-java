@@ -9,13 +9,23 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.Collections;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public class Crawler {
 
-    private static int getLinkStatusCode(String url) {
+    private final Set<String> visitedLinks = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private final int maxDepth;
+
+    public Crawler(int maxDepth) {
+        this.maxDepth = maxDepth;
+    }
+
+    private int getLinkStatusCode(String url) {
         try {
             HttpClient client = HttpClient.newHttpClient();
             HttpRequest request = HttpRequest.newBuilder()
@@ -29,17 +39,16 @@ public class Crawler {
         }
     }
 
-    public static void main(String[] args) {
-        String startUrl = "https://en.wikipedia.org/wiki/Java_(programming_language)";
+    public void crawl(String url, int depth, ExecutorService executor) {
+        if (depth > maxDepth || !visitedLinks.add(url)) {
+            return;
+        }
 
-        ExecutorService executor = Executors.newFixedThreadPool(10);
-
-        System.out.println("Fetching and parsing: " + startUrl);
+        System.out.println("-> Crawling: (" + depth + ") " + url);
 
         try {
-            Document doc = Jsoup.connect(startUrl).get();
+            Document doc = Jsoup.connect(url).get();
             Elements links = doc.select("a[href]");
-            System.out.println("\nFound " + links.size() + " links. Checking status concurrently...");
 
             for (Element link : links) {
                 String absoluteUrl = link.absUrl("href");
@@ -48,28 +57,37 @@ public class Crawler {
                     continue;
                 }
 
-                Runnable task = () -> {
+                executor.submit(() -> {
                     int statusCode = getLinkStatusCode(absoluteUrl);
-                    System.out.println("[" + statusCode + "] " + absoluteUrl);
-                };
+                    if (statusCode != 200) {
+                        System.out.println("[" + statusCode + "] BROKEN -> " + absoluteUrl + " (Found on " + url + ")");
+                    }
+                });
 
-                executor.submit(task);
+                crawl(absoluteUrl, depth + 1, executor);
             }
-
         } catch (IOException e) {
-            System.err.println("An error occurred while fetching the URL: " + e.getMessage());
-            e.printStackTrace();
-        } finally {
-            executor.shutdown();
-            try {
-                if (!executor.awaitTermination(1, TimeUnit.MINUTES)) {
-                    System.err.println("Executor did not terminate in the specified time.");
-                    executor.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                executor.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
+
         }
+    }
+
+    public static void main(String[] args) {
+        String startUrl = "https://en.wikipedia.org/wiki/Java_(programming_language)";
+        int maxDepth = 2;
+        Crawler crawler = new Crawler(maxDepth);
+        ExecutorService executor = Executors.newFixedThreadPool(10);
+
+        crawler.crawl(startUrl, 1, executor);
+
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(10, TimeUnit.MINUTES)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        System.out.println("Crawl finished.");
     }
 }
